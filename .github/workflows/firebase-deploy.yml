@@ -10,16 +10,21 @@ jobs:
       - name: Checkout Source Code
         uses: actions/checkout@v4
 
-      - name: Setup Node Environment
-        uses: actions/setup-node@v4
+      - name: Install Bun Runtime Environment
+        uses: oven-sh/setup-bun@v2
         with:
-          node-version: 20
+          bun-version: latest
 
-      - name: Install Dependencies
-        run: npm install
+      - name: Fetch Core Dependencies
+        run: bun install
 
-      - name: Build Application
-        run: npm run build
+      - name: Compile Vite Production Build
+        run: bun run build
 
-      - name: Push Assets Live
-        run: npx firebase-tools deploy --only hosting --project divine-transport-nnm9t --token "${{ secrets.FIREBASE_TOKEN }}"
+      - name: Deploy Live Assets to Firebase Hosting
+        uses: FirebaseExtended/action-hosting-deploy@v0
+        with:
+          repoToken: ${{ secrets.GITHUB_TOKEN }}
+          firebaseServiceAccount: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+          projectId: divine-transport-nnm9t
+          channelId: live
