@@ -3,10 +3,6 @@ on:
   push:
     branches:
       - main
-permissions:
-  contents: read
-  id-token: write
-  deployments: write
 jobs:
   build_and_deploy:
     runs-on: ubuntu-latest
@@ -14,7 +10,7 @@ jobs:
       - name: Checkout Source Code
         uses: actions/checkout@v4
 
-      - name: Setup Node
+      - name: Setup Node Environment
         uses: actions/setup-node@v4
         with:
           node-version: 20
@@ -25,9 +21,5 @@ jobs:
       - name: Build Application
         run: npm run build
 
-      - name: Deploy to Firebase Hosting
-        uses: FirebaseExtended/action-hosting-deploy@v0
-        with:
-          repoToken: ${{ secrets.GITHUB_TOKEN }}
-          projectId: divine-transport-nnm9t
-          channelId: live
+      - name: Push Assets Live
+        run: npx firebase-tools deploy --only hosting --project divine-transport-nnm9t --token "${{ secrets.FIREBASE_TOKEN }}"
