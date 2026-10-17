@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { ArrowLeft, Bookmark, ArrowRight, Building, MapPin, Camera, ChevronLeft, ChevronRight, TrendingUp } from 'lucide-react';
 import { Property } from '../types';
 import { getDualCurrencyPrice } from '../utils/currency';
@@ -24,6 +24,12 @@ export const SearchResultsScreen: React.FC<SearchResultsScreenProps> = ({
   userCurrency,
   onStartDueDiligence,
 }) => {
+  useEffect(() => {
+    window.scrollTo({ top: 0, left: 0, behavior: 'instant' });
+    document.documentElement.scrollTop = 0;
+    document.body.scrollTop = 0;
+  }, []);
+
   // Photo carousel indexes per property ID
   const [photoIndexes, setPhotoIndexes] = useState<Record<string, number>>({});
 

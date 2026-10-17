@@ -118,7 +118,7 @@ export const HomeSearchScreen: React.FC<HomeSearchScreenProps> = ({
         purpose: (result.purpose as PurchasePurpose) || purpose,
         propertyType: result.propertyType && result.propertyType !== 'All' ? result.propertyType : 'All',
         location: result.location && result.location !== 'All' ? result.location : 'All',
-        maxPrice: result.maxPrice && result.maxPrice > 0 ? result.maxPrice : 0,
+        maxPrice: result.maxPrice && result.maxPrice > 0 ? result.maxPrice : (purpose === 'Rent' ? 6500 : 2000000),
         searchQuery: aiPrompt,
       });
     } catch (err) {
@@ -484,19 +484,24 @@ export const HomeSearchScreen: React.FC<HomeSearchScreenProps> = ({
                         </span>
                         <input
                           type="number"
-                          min={0}
-                          step={purpose === 'Rent' ? 100 : 10000}
-                          value={maxPrice === 0 ? '' : maxPrice}
+                          min={purpose === 'Rent' ? 500 : 100000}
+                          step={purpose === 'Rent' ? 250 : 25000}
+                          value={maxPrice > 0 ? maxPrice : (purpose === 'Rent' ? 4500 : 1800000)}
                           onChange={(e) => {
-                            const val = e.target.value === '' ? 0 : Number(e.target.value);
-                            setMaxPrice(Math.max(0, val));
+                            const val = Number(e.target.value);
+                            const minVal = purpose === 'Rent' ? 500 : 100000;
+                            if (isNaN(val) || val <= 0) {
+                              setMaxPrice(minVal);
+                            } else {
+                              setMaxPrice(Math.max(minVal, val));
+                            }
                           }}
                           placeholder={`Enter budget in ${currencySymbol}`}
                           className="w-full pl-10 pr-3 py-1.5 rounded-lg bg-white border border-[#E8E2D6] text-xs sm:text-sm font-mono font-bold text-[#1E2A44] focus:outline-none focus:border-amber-500"
                         />
                       </div>
                       <span className="font-mono text-xs font-bold text-emerald-800 bg-emerald-50 px-2.5 py-1.5 rounded-lg border border-emerald-200 shrink-0">
-                        {currencySymbol} {maxPrice.toLocaleString()}
+                        {currencySymbol} {Math.max(purpose === 'Rent' ? 500 : 100000, maxPrice).toLocaleString()}
                       </span>
                     </div>
 

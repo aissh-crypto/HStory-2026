@@ -77,55 +77,150 @@ export async function testFirestoreConnection() {
   }
 }
 
+export const saveActiveAuthSession = (user: { uid: string; email?: string | null; displayName?: string | null }) => {
+  try {
+    localStorage.setItem(
+      'homestory_auth_session',
+      JSON.stringify({
+        uid: user.uid,
+        email: user.email || '',
+        displayName: user.displayName || (user.email ? user.email.split('@')[0] : 'Property Buyer'),
+        isAnonymous: false,
+      })
+    );
+  } catch {}
+};
+
+export const getSavedAuthSession = (): User | null => {
+  try {
+    const raw = localStorage.getItem('homestory_auth_session');
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (parsed && parsed.uid) {
+        return parsed as unknown as User;
+      }
+    }
+  } catch {}
+  return null;
+};
+
+// Helper for local registered accounts store
+const getRegisteredAccounts = (): Record<string, { uid: string; email: string; pass: string; name: string }> => {
+  try {
+    const raw = localStorage.getItem('homestory_registered_accounts');
+    return raw ? JSON.parse(raw) : {};
+  } catch {
+    return {};
+  }
+};
+
+const saveRegisteredAccount = (account: { uid: string; email: string; pass: string; name: string }) => {
+  try {
+    const accounts = getRegisteredAccounts();
+    accounts[account.email.toLowerCase()] = account;
+    localStorage.setItem('homestory_registered_accounts', JSON.stringify(accounts));
+  } catch {}
+};
+
 export const signInWithGoogle = async () => {
-  return await signInWithPopup(auth, googleProvider);
+  const res = await signInWithPopup(auth, googleProvider);
+  if (res.user) {
+    saveActiveAuthSession(res.user);
+  }
+  return res;
 };
 
 export const signInWithEmail = async (email: string, pass: string) => {
+  const cleanEmail = email.trim().toLowerCase();
   try {
-    return await fbSignInWithEmail(auth, email, pass);
+    const res = await fbSignInWithEmail(auth, cleanEmail, pass);
+    if (res.user) {
+      saveActiveAuthSession(res.user);
+    }
+    return res;
   } catch (err: any) {
+    // If Firebase email provider is not enabled in Firebase Console, use persistent verified account registry
     if (
       err.code === 'auth/operation-not-allowed' ||
       err.code === 'auth/admin-restricted-operation' ||
       err.code === 'auth/network-request-failed' ||
       err.message?.includes('operation-not-allowed')
     ) {
-      console.warn('Firebase email auth not enabled; generating local buyer session:', err);
-      const fallbackUser = {
-        uid: `buyer-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
-        displayName: email.split('@')[0],
-        email: email,
+      const accounts = getRegisteredAccounts();
+      const existingAccount = accounts[cleanEmail];
+
+      if (!existingAccount) {
+        // Enforce registration requirement: Do NOT allow unregistered users to just sign in
+        const error = new Error('No registered account found with this email. You must register first to create your dossier.');
+        (error as any).code = 'auth/user-not-found';
+        throw error;
+      }
+
+      if (existingAccount.pass !== pass) {
+        const error = new Error('Incorrect password. Please verify your credentials or register a new account.');
+        (error as any).code = 'auth/wrong-password';
+        throw error;
+      }
+
+      const verifiedUser = {
+        uid: existingAccount.uid,
+        displayName: existingAccount.name,
+        email: existingAccount.email,
         isAnonymous: false,
       } as unknown as User;
-      return { user: fallbackUser };
+
+      saveActiveAuthSession(verifiedUser);
+      return { user: verifiedUser };
     }
     throw err;
   }
 };
 
 export const registerWithEmail = async (email: string, pass: string, name?: string) => {
+  const cleanEmail = email.trim().toLowerCase();
+  const cleanName = (name || '').trim() || cleanEmail.split('@')[0];
+
   try {
-    const res = await fbCreateUserWithEmail(auth, email, pass);
-    if (name && res.user) {
-      await fbUpdateProfile(res.user, { displayName: name });
+    const res = await fbCreateUserWithEmail(auth, cleanEmail, pass);
+    if (res.user) {
+      if (cleanName) {
+        await fbUpdateProfile(res.user, { displayName: cleanName }).catch(() => {});
+      }
+      saveActiveAuthSession(res.user);
     }
     return res;
   } catch (err: any) {
+    // If Firebase email provider is not enabled in Firebase Console, register in persistent local registry
     if (
       err.code === 'auth/operation-not-allowed' ||
       err.code === 'auth/admin-restricted-operation' ||
       err.code === 'auth/network-request-failed' ||
       err.message?.includes('operation-not-allowed')
     ) {
-      console.warn('Firebase email auth not enabled; generating persistent local buyer session:', err);
-      const fallbackUser = {
-        uid: `buyer-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
-        displayName: name || email.split('@')[0],
-        email: email,
+      const accounts = getRegisteredAccounts();
+      if (accounts[cleanEmail]) {
+        const error = new Error('An account already exists with this email address. Please switch to Sign In.');
+        (error as any).code = 'auth/email-already-in-use';
+        throw error;
+      }
+
+      const newUid = `buyer-${cleanEmail.replace(/[^a-zA-Z0-9]/g, '')}-${Date.now().toString().slice(-6)}`;
+      saveRegisteredAccount({
+        uid: newUid,
+        email: cleanEmail,
+        pass,
+        name: cleanName,
+      });
+
+      const newUser = {
+        uid: newUid,
+        displayName: cleanName,
+        email: cleanEmail,
         isAnonymous: false,
       } as unknown as User;
-      return { user: fallbackUser };
+
+      saveActiveAuthSession(newUser);
+      return { user: newUser };
     }
     throw err;
   }
@@ -136,19 +231,25 @@ export const signInDemoUser = async (name: string = 'Marcus Vance', email: strin
     const res = await fbSignInAnonymously(auth);
     if (res.user) {
       await fbUpdateProfile(res.user, { displayName: name });
+      saveActiveAuthSession(res.user);
     }
     return res.user;
   } catch {
-    // If anonymous sign in is disabled in Firebase console, return a mock user object
-    return {
+    const demoUser = {
       uid: 'demo-buyer-vance-001',
       displayName: name,
       email,
       isAnonymous: false,
     } as unknown as User;
+    saveActiveAuthSession(demoUser);
+    return demoUser;
   }
 };
 
 export const signOutUser = async () => {
-  return await fbSignOut(auth);
+  try {
+    localStorage.removeItem('homestory_auth_session');
+  } catch {}
+  return await fbSignOut(auth).catch(() => {});
 };
+

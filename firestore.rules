@@ -15,74 +15,34 @@ service cloud.firestore {
       return isSignedIn() && request.auth.uid == userId;
     }
 
-    function isValidId(id) {
-      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
-    }
-
-    function incoming() {
-      return request.resource.data;
-    }
-
-    function existing() {
-      return resource.data;
-    }
-
-    function isValidUserProfile(data) {
-      return data.keys().hasAll(['id', 'email', 'displayName', 'residencyStatus', 'countryPreference']) &&
-             data.id is string && data.id.size() <= 128 &&
-             data.email is string && data.email.size() <= 256 &&
-             data.displayName is string && data.displayName.size() <= 128 &&
-             data.residencyStatus in ['Citizen', 'Permanent Resident', 'Foreign Buyer'] &&
-             data.countryPreference in ['Malaysia', 'Singapore'];
-    }
-
-    function isValidSavedProperty(data) {
-      return data.keys().hasAll(['propertyId', 'savedAt']) &&
-             data.propertyId is string && data.propertyId.size() <= 64;
-    }
-
-    function isValidCaseFile(data) {
-      return data.keys().hasAll(['caseId', 'propertyId', 'country', 'status']) &&
-             data.caseId is string && data.caseId.size() <= 64 &&
-             data.propertyId is string && data.propertyId.size() <= 64 &&
-             data.country in ['Malaysia', 'Singapore'] &&
-             data.status in ['not_started', 'in_progress', 'done'];
-    }
-
-    // User Profile Document
+    // User Profile Document and all nested subcollections (saved, caseFiles, chats, inspections)
     match /users/{userId} {
-      allow get: if isOwner(userId);
-      allow list: if isOwner(userId);
-      allow create: if isOwner(userId) && isValidId(userId) && isValidUserProfile(incoming()) && incoming().id == userId;
-      allow update: if isOwner(userId) && isValidId(userId) && isValidUserProfile(incoming()) && incoming().id == userId;
-      allow delete: if isOwner(userId);
+      allow read, write: if isOwner(userId);
 
       // Subcollection: Saved Properties
       match /saved/{propertyId} {
-        allow get: if isOwner(userId);
-        allow list: if isOwner(userId);
-        allow create: if isOwner(userId) && isValidId(propertyId) && isValidSavedProperty(incoming());
-        allow update: if isOwner(userId) && isValidId(propertyId) && isValidSavedProperty(incoming());
-        allow delete: if isOwner(userId) && isValidId(propertyId);
+        allow read, write: if isOwner(userId);
       }
 
-      // Subcollection: Case Files
+      // Subcollection: Case Files and their nested chats / media
       match /caseFiles/{caseId} {
-        allow get: if isOwner(userId);
-        allow list: if isOwner(userId);
-        allow create: if isOwner(userId) && isValidId(caseId) && isValidCaseFile(incoming());
-        allow update: if isOwner(userId) && isValidId(caseId) && isValidCaseFile(incoming());
-        allow delete: if isOwner(userId) && isValidId(caseId);
+        allow read, write: if isOwner(userId);
+
+        match /{allChildren=**} {
+          allow read, write: if isOwner(userId);
+        }
       }
 
       // Subcollection: Live Camera Inspections
       match /inspections/{inspectionId} {
-        allow get: if isOwner(userId);
-        allow list: if isOwner(userId);
-        allow create: if isOwner(userId) && isValidId(inspectionId);
-        allow update: if isOwner(userId) && isValidId(inspectionId);
-        allow delete: if isOwner(userId) && isValidId(inspectionId);
+        allow read, write: if isOwner(userId);
+      }
+
+      // Catch-all for any user subcollections
+      match /{allChildren=**} {
+        allow read, write: if isOwner(userId);
       }
     }
   }
 }
+

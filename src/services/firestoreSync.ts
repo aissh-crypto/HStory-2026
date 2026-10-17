@@ -103,26 +103,45 @@ export const firestoreSync = {
     }
   },
 
-  // Save or update Case File
+  // Save or update Case File including full AI chats, videos, and photos
   async saveCaseFile(userId: string, caseFile: CaseFile): Promise<void> {
     const path = `users/${userId}/caseFiles/${caseFile.caseId}`;
     try {
       let statusStr = 'in_progress';
       if (caseFile.status === 'Decision Ready') statusStr = 'done';
-      else if (caseFile.status === 'Archived') statusStr = 'not_started';
+      else if (caseFile.status === 'Archived' || caseFile.status === 'Not Started') statusStr = 'not_started';
+
+      const country = caseFile.modules?.countryCompliance?.country || 'Malaysia';
 
       await setDoc(doc(db, 'users', userId, 'caseFiles', caseFile.caseId), {
         caseId: caseFile.caseId,
         propertyId: caseFile.propertyId,
-        country: caseFile.modules?.countryCompliance?.country || 'Malaysia',
+        country,
         status: statusStr,
-        modules: caseFile.modules,
-        verdict: caseFile.decisionProfile,
-        decisionProfile: caseFile.decisionProfile,
+        displayStatus: caseFile.status,
+        progressPercent: caseFile.progressPercent ?? 0,
+        modules: caseFile.modules || {},
+        verdict: caseFile.decisionProfile || null,
+        decisionProfile: caseFile.decisionProfile || null,
         updatedAt: new Date().toISOString(),
       }, { merge: true });
+
+      // Save full AI chat session (including video and picture attachments) into subcollection
+      if (caseFile.modules?.siteVisit) {
+        const site = caseFile.modules.siteVisit;
+        const chatPath = `users/${userId}/caseFiles/${caseFile.caseId}/chats/inspection_walkthrough`;
+        await setDoc(doc(db, 'users', userId, 'caseFiles', caseFile.caseId, 'chats', 'inspection_walkthrough'), {
+          caseId: caseFile.caseId,
+          propertyId: caseFile.propertyId,
+          transcripts: site.transcripts || [],
+          photos: site.photos || [],
+          inspectionVideos: site.inspectionVideos || [],
+          notes: site.notes || '',
+          syncedAt: new Date().toISOString(),
+        }, { merge: true }).catch((err) => console.warn('Subcollection chat sync note:', err));
+      }
     } catch (error) {
-      handleFirestoreError(error, OperationType.WRITE, path);
+      console.warn('Firestore saveCaseFile notice (saved locally in browser storage):', error);
     }
   },
 

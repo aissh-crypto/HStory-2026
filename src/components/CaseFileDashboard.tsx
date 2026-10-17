@@ -144,6 +144,12 @@ export const CaseFileDashboard: React.FC<CaseFileDashboardProps> = ({
     caption?: string;
   } | null>(null);
 
+  useEffect(() => {
+    window.scrollTo({ top: 0, left: 0, behavior: 'instant' });
+    document.documentElement.scrollTop = 0;
+    document.body.scrollTop = 0;
+  }, [caseFile?.caseId]);
+
   const [debts, setDebts] = useState<number>(
     typeof safeStressTest.otherDebtCommitments === 'number' && safeStressTest.otherDebtCommitments >= 0
       ? safeStressTest.otherDebtCommitments

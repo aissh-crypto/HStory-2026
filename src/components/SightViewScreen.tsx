@@ -160,6 +160,13 @@ export const SightViewScreen: React.FC<SightViewScreenProps> = ({
   const photoUploadInputRef = useRef<HTMLInputElement>(null);
   const speechRecognitionRef = useRef<any>(null);
 
+  // Scroll to top of page on mount
+  useEffect(() => {
+    window.scrollTo({ top: 0, left: 0, behavior: 'instant' });
+    document.documentElement.scrollTop = 0;
+    document.body.scrollTop = 0;
+  }, []);
+
   // Video call duration timer
   useEffect(() => {
     if (isVideoCallActive) {

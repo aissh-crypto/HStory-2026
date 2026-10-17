@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { onAuthStateChanged, User } from 'firebase/auth';
-import { auth, testFirestoreConnection, signOutUser } from './services/firebase';
+import { auth, testFirestoreConnection, signOutUser, getSavedAuthSession, saveActiveAuthSession } from './services/firebase';
 import { firestoreSync } from './services/firestoreSync';
 import { Navbar } from './components/Navbar';
 import { BurgerDrawer } from './components/BurgerDrawer';
@@ -239,7 +239,7 @@ const sanitizeCaseFile = (c: any, fallbackProfile: UserProfile = DEFAULT_USER_PR
 };
 
 export const App: React.FC = () => {
-  const [currentUser, setCurrentUser] = useState<User | null>(null);
+  const [currentUser, setCurrentUser] = useState<User | null>(() => getSavedAuthSession());
   const [activeTab, setActiveTab] = useState<NavTab>('search');
   const [selectedProperty, setSelectedProperty] = useState<Property | null>(null);
   const [activeSightViewCaseId, setActiveSightViewCaseId] = useState<string | null>(null);
@@ -261,44 +261,38 @@ export const App: React.FC = () => {
 
   const [isProfileModalOpen, setIsProfileModalOpen] = useState<boolean>(false);
 
-  // Synchronize User Session: Distinguish cleanly between first-time and returning users
+  // Synchronize User Session: Cleanly recognize returning users and never wipe or prompt with presets repeatedly
   const syncUserSession = async (user: User) => {
     try {
       const userKey = `homestory_user_${user.uid}`;
-      const isTargetUserToReset = user.email?.toLowerCase() === 'aisshu16apple@gmail.com';
+      saveActiveAuthSession(user);
 
-      // If user requested account deletion & reset, wipe remote & local data
-      if (isTargetUserToReset) {
-        await firestoreSync.deleteUserProfile(user.uid).catch(() => {});
-        localStorage.removeItem(userKey);
-        localStorage.removeItem(`homestory_saved_${user.uid}`);
-        localStorage.removeItem(`homestory_cases_${user.uid}`);
-        localStorage.removeItem('homestory_user_profile');
-        localStorage.removeItem('homestory_saved_ids');
-        localStorage.removeItem('homestory_case_files');
-      }
+      const cachedProfileStr = localStorage.getItem(userKey) || localStorage.getItem('homestory_user_profile');
 
-      const cachedProfileStr = isTargetUserToReset ? null : localStorage.getItem(userKey);
-
-      // Check remote Firestore first (force null if target user reset requested)
-      const remoteProfile = isTargetUserToReset ? null : await firestoreSync.getUserProfile(user.uid);
+      // Check remote Firestore first
+      const remoteProfile = await firestoreSync.getUserProfile(user.uid);
       const existingProfile = remoteProfile || (cachedProfileStr ? JSON.parse(cachedProfileStr) : null);
 
-      if (existingProfile && !isTargetUserToReset) {
-        // Returning user: restore their own personal profile and saved dossier
+      if (existingProfile && (existingProfile.id === user.uid || existingProfile.email === user.email || existingProfile.displayName)) {
+        // Returning user: restore personal profile and dossier data. NEVER ask for onboarding presets again.
         setUserProfile(existingProfile);
         const savedIds = await firestoreSync.getSavedPropertyIds(user.uid);
-        const finalSaved = savedIds.length > 0 ? savedIds : JSON.parse(localStorage.getItem(`homestory_saved_${user.uid}`) || '[]');
+        const localSaved = JSON.parse(localStorage.getItem(`homestory_saved_${user.uid}`) || '[]');
+        const finalSaved = savedIds.length > 0 ? savedIds : (localSaved.length > 0 ? localSaved : [MOCK_PROPERTIES[0].id, MOCK_PROPERTIES[1].id]);
         setSavedPropertyIds(finalSaved);
 
         const cases = await firestoreSync.getCaseFiles(user.uid);
         const localCases = JSON.parse(localStorage.getItem(`homestory_cases_${user.uid}`) || '[]');
         const finalCases = cases.length > 0 ? cases : localCases;
-        setCaseFiles(finalCases.map((c: any) => sanitizeCaseFile(c, existingProfile)));
+        if (finalCases.length > 0) {
+          setCaseFiles(finalCases.map((c: any) => sanitizeCaseFile(c, existingProfile)));
+        }
         setAuthWelcomeToast(`Welcome back, ${existingProfile.displayName || existingProfile.name}!`);
+        setIsProfileModalOpen(false); // Returning user: DO NOT open presets modal!
       } else {
-        // First-time user: initialize clean fresh profile from Google / Auth credentials
+        // Brand-new registered user: initialize clean profile with valid non-zero baseline salary/debts
         const cleanName = user.displayName || (user.email ? user.email.split('@')[0] : 'Property Buyer');
+        const isSingapore = detectLocationCurrency() === 'SGD';
         const freshProfile: UserProfile = {
           id: user.uid,
           name: cleanName,
@@ -306,42 +300,38 @@ export const App: React.FC = () => {
           email: user.email || '',
           residencyStatus: 'Citizen',
           buyerRole: 'First-time Homebuyer',
-          countryPreference: 'Malaysia',
-          monthlyGrossIncome: 0,
-          existingMonthlyDebts: 0,
-          defaultCurrency: 'MYR',
+          countryPreference: isSingapore ? 'Singapore' : 'Malaysia',
+          monthlyGrossIncome: isSingapore ? 9500 : 18000,
+          existingMonthlyDebts: isSingapore ? 1200 : 2200,
+          defaultCurrency: detectLocationCurrency(),
+          currencyPreference: 'AUTO',
         };
 
         setUserProfile(freshProfile);
-        // Clean slate for new user: empty saved list & empty case files (starts at min value)
-        setSavedPropertyIds([]);
-        setCaseFiles([]);
+        setSavedPropertyIds([MOCK_PROPERTIES[0].id, MOCK_PROPERTIES[1].id]);
 
         localStorage.setItem(userKey, JSON.stringify(freshProfile));
-        localStorage.setItem(`homestory_saved_${user.uid}`, JSON.stringify([]));
-        localStorage.setItem(`homestory_cases_${user.uid}`, JSON.stringify([]));
+        localStorage.setItem(`homestory_saved_${user.uid}`, JSON.stringify([MOCK_PROPERTIES[0].id, MOCK_PROPERTIES[1].id]));
         localStorage.setItem('homestory_user_profile', JSON.stringify(freshProfile));
-        localStorage.setItem('homestory_saved_ids', JSON.stringify([]));
-        localStorage.setItem('homestory_case_files', JSON.stringify([]));
 
         firestoreSync.saveUserProfile(user.uid, freshProfile).catch(console.warn);
-        setAuthWelcomeToast(`Welcome to Homestory, ${cleanName}! Please set up your first-time buyer profile.`);
-        setIsProfileModalOpen(true); // Open First-Time Onboarding Modal
+        setAuthWelcomeToast(`Welcome to Homestory, ${cleanName}! Please verify your buyer presets.`);
+        setIsProfileModalOpen(true); // Open First-Time Onboarding Modal ONLY for newly created accounts
       }
     } catch (err) {
       console.error('User session sync error:', err);
     }
   };
 
-  // Full reset account action: Wipes records and signs out so user can test the first-time user login journey
+  // Full reset account action: Wipes records and signs out when explicitly triggered by the user in settings
   const handleResetUserAccount = async () => {
     if (currentUser) {
       await firestoreSync.deleteUserProfile(currentUser.uid).catch(() => {});
       await signOutUser().catch(() => {});
     }
-    sessionStorage.removeItem('homestory_aisshu_reset_done');
     localStorage.clear();
 
+    const isSingapore = detectLocationCurrency() === 'SGD';
     const freshProfile: UserProfile = {
       id: 'buyer-fresh',
       name: 'New Property Buyer',
@@ -349,26 +339,27 @@ export const App: React.FC = () => {
       email: '',
       residencyStatus: 'Citizen',
       buyerRole: 'First-time Homebuyer',
-      countryPreference: 'Malaysia',
-      monthlyGrossIncome: 0,
-      existingMonthlyDebts: 0,
+      countryPreference: isSingapore ? 'Singapore' : 'Malaysia',
+      monthlyGrossIncome: isSingapore ? 9500 : 18000,
+      existingMonthlyDebts: isSingapore ? 1200 : 2200,
       defaultCurrency: detectLocationCurrency(),
       currencyPreference: 'AUTO',
     };
 
     setCurrentUser(null);
     setUserProfile(freshProfile);
-    setSavedPropertyIds([]);
+    setSavedPropertyIds([MOCK_PROPERTIES[0].id, MOCK_PROPERTIES[1].id]);
     setCaseFiles([]);
     setActiveCaseFile(null);
     setSelectedProperty(null);
     setActiveTab('search');
-    setAuthWelcomeToast('Account details wiped. You are now logged out to test the first-time user flow.');
-    setIsAuthModalOpen(true); // Trigger login or login via Google
+    setAuthWelcomeToast('Account details wiped. You are now logged out.');
+    setIsAuthModalOpen(true);
   };
 
   const handleAuthSuccess = (user: User) => {
     setCurrentUser(user);
+    saveActiveAuthSession(user);
     setIsAuthModalOpen(false);
     syncUserSession(user);
     if (pendingAuthAction) {
@@ -394,10 +385,25 @@ export const App: React.FC = () => {
     } catch {}
   };
 
-  const handleSelectPropertyInternal = (prop: Property | null) => {
+  // Guaranteed scroll-to-top on every page navigation, tab redirection, or drilldown transition
+  const scrollToTop = () => {
     window.scrollTo({ top: 0, left: 0, behavior: 'instant' });
     document.documentElement.scrollTop = 0;
     document.body.scrollTop = 0;
+    requestAnimationFrame(() => {
+      window.scrollTo({ top: 0, left: 0, behavior: 'instant' });
+      document.documentElement.scrollTop = 0;
+      document.body.scrollTop = 0;
+    });
+    setTimeout(() => {
+      window.scrollTo({ top: 0, left: 0, behavior: 'instant' });
+      document.documentElement.scrollTop = 0;
+      document.body.scrollTop = 0;
+    }, 40);
+  };
+
+  const handleSelectPropertyInternal = (prop: Property | null) => {
+    scrollToTop();
     if (prop) pushNavHistory();
     setSelectedProperty(prop);
   };
@@ -475,9 +481,13 @@ export const App: React.FC = () => {
   const isSearchActive = searchResults !== null;
 
   useEffect(() => {
-    window.scrollTo({ top: 0, left: 0, behavior: 'instant' });
-    document.documentElement.scrollTop = 0;
-    document.body.scrollTop = 0;
+    if (typeof window !== 'undefined' && 'scrollRestoration' in window.history) {
+      window.history.scrollRestoration = 'manual';
+    }
+  }, []);
+
+  useEffect(() => {
+    scrollToTop();
   }, [activeTab, selectedPropertyId, activeCaseId, isSearchActive]);
 
   // User Profile
@@ -536,9 +546,18 @@ export const App: React.FC = () => {
     testFirestoreConnection();
 
     const unsubscribe = onAuthStateChanged(auth, async (user) => {
-      setCurrentUser(user);
       if (user) {
+        setCurrentUser(user);
+        saveActiveAuthSession(user);
         await syncUserSession(user);
+      } else {
+        const savedSession = getSavedAuthSession();
+        if (savedSession) {
+          setCurrentUser(savedSession);
+          await syncUserSession(savedSession);
+        } else {
+          setCurrentUser(null);
+        }
       }
     });
 
@@ -582,7 +601,9 @@ export const App: React.FC = () => {
   };
 
   const handleUpdateCaseFile = async (updated: CaseFile) => {
-    const updatedCases = caseFiles.map((c) => (c.caseId === updated.caseId ? updated : c));
+    const updatedCases = caseFiles.some((c) => c.caseId === updated.caseId)
+      ? caseFiles.map((c) => (c.caseId === updated.caseId ? updated : c))
+      : [updated, ...caseFiles];
     setCaseFiles(updatedCases);
     setActiveCaseFile(updated);
     localStorage.setItem('homestory_case_files', JSON.stringify(updatedCases));
@@ -993,6 +1014,7 @@ export const App: React.FC = () => {
   };
 
   const handleTabNavigation = (tab: NavTab) => {
+    scrollToTop();
     handleSelectPropertyInternal(null);
     setActiveCaseFile(null); // Always open the full list of case files when navigating to case files
     if (tab === 'search') {
@@ -1003,6 +1025,7 @@ export const App: React.FC = () => {
     if (tab === 'saved') {
       executeWithAuth('Sign in or register to view your saved properties collection.', () => {
         pushNavHistory();
+        scrollToTop();
         setActiveTab('saved');
       });
       return;
@@ -1010,6 +1033,7 @@ export const App: React.FC = () => {
     if (tab === 'cases') {
       executeWithAuth('Sign in or register to access due diligence case dossiers and stress tests.', () => {
         pushNavHistory();
+        scrollToTop();
         setActiveTab('cases');
       });
       return;
@@ -1017,6 +1041,7 @@ export const App: React.FC = () => {
     if (tab === 'sightview') {
       executeWithAuth('Sign in or register to launch SightView AI™ live inspection camera.', () => {
         pushNavHistory();
+        scrollToTop();
         setActiveTab('sightview');
       });
       return;
@@ -1024,11 +1049,13 @@ export const App: React.FC = () => {
     if (tab === 'account') {
       executeWithAuth('Sign in or register to configure your personal buyer underwriting profile.', () => {
         pushNavHistory();
+        scrollToTop();
         setActiveTab('account');
       });
       return;
     }
     pushNavHistory();
+    scrollToTop();
     setActiveTab(tab);
   };
 
