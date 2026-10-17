@@ -1,0 +1,1116 @@
+import React, { useState, useEffect, useMemo } from 'react';
+import { onAuthStateChanged, User } from 'firebase/auth';
+import { auth, testFirestoreConnection, signOutUser } from './services/firebase';
+import { firestoreSync } from './services/firestoreSync';
+import { Navbar } from './components/Navbar';
+import { BurgerDrawer } from './components/BurgerDrawer';
+import { HowItWorksModal } from './components/HowItWorksModal';
+import { HomeSearchScreen } from './components/HomeSearchScreen';
+import { SearchResultsScreen } from './components/SearchResultsScreen';
+import { PropertyDetailScreen } from './components/PropertyDetailScreen';
+import { CaseFileDashboard } from './components/CaseFileDashboard';
+import { CaseFilesListView } from './components/CaseFilesListView';
+import { SavedScreen } from './components/SavedScreen';
+import { AccountScreen } from './components/AccountScreen';
+import { SightViewScreen } from './components/SightViewScreen';
+import { AuthModal } from './components/AuthModal';
+import { UserProfileModal } from './components/UserProfileModal';
+import { MOCK_PROPERTIES } from './data/mockProperties';
+import { COUNTRY_PACKS } from './data/countryPacks';
+import { Property, CaseFile, UserProfile, NavTab, PurchasePurpose } from './types';
+import { detectLocationCurrency } from './utils/currency';
+import { computeCaseFileProgress } from './utils/caseStatus';
+
+const DEFAULT_USER_PROFILE: UserProfile = {
+  name: 'Marcus Vance',
+  displayName: 'Marcus Vance',
+  email: 'marcus.vance@homestory.ai',
+  residencyStatus: 'Citizen',
+  buyerRole: 'First-time Homebuyer',
+  countryPreference: 'Malaysia',
+  monthlyGrossIncome: 18000,
+  existingMonthlyDebts: 2200,
+  defaultCurrency: detectLocationCurrency(),
+  currencyPreference: 'AUTO',
+};
+
+// Create a new Case File for a property
+const createNewCaseFile = (property: Property, profile: UserProfile): CaseFile => {
+  const countryPack = COUNTRY_PACKS[property.country];
+  const price = property.price;
+  const downPaymentPercent = 20;
+  const interestRate = 4.2;
+  const loanTenureYears = 30;
+  const loanAmount = Math.round(price * (1 - downPaymentPercent / 100));
+  const monthlyRate = interestRate / 100 / 12;
+  const totalPayments = loanTenureYears * 12;
+
+  const monthlyInstallment = Math.round(
+    (loanAmount * monthlyRate * Math.pow(1 + monthlyRate, totalPayments)) /
+      (Math.pow(1 + monthlyRate, totalPayments) - 1)
+  );
+
+  const stressedRate = (interestRate + 2.0) / 100 / 12;
+  const stressedInstallment = Math.round(
+    (loanAmount * stressedRate * Math.pow(1 + stressedRate, totalPayments)) /
+      (Math.pow(1 + stressedRate, totalPayments) - 1)
+  );
+
+  const dsrPercent = Number(
+    (((monthlyInstallment + profile.existingMonthlyDebts) / (profile.monthlyGrossIncome || 1)) * 100).toFixed(1)
+  );
+  const stressedDsrPercent = Number(
+    (((stressedInstallment + profile.existingMonthlyDebts) / (profile.monthlyGrossIncome || 1)) * 100).toFixed(1)
+  );
+
+  return {
+    caseId: `case-${property.id}-${Date.now().toString().slice(-4)}`,
+    propertyId: property.id,
+    createdDate: new Date().toLocaleDateString(),
+    status: 'Not Started',
+    progressPercent: 0, // Starts at min value (0%) for newly initiated files
+    modules: {
+      priceAnalysis: {
+        completed: false,
+        notes: `Asking price compared against ${property.city} fair valuation corridor.`,
+        customValuation: property.valuation,
+      },
+      stressTest: {
+        completed: false,
+        downPaymentPercent,
+        interestRate,
+        loanTenureYears,
+        monthlyIncome: profile.monthlyGrossIncome,
+        otherDebtCommitments: profile.existingMonthlyDebts,
+        loanAmount,
+        monthlyInstallment,
+        stressedInstallment,
+        dsrPercent,
+        stressedDsrPercent,
+        totalInterestPaid: monthlyInstallment * totalPayments - loanAmount,
+        approvalVerdict: stressedDsrPercent > countryPack.maxStandardDsr ? 'Moderate Risk' : 'Safe',
+        notes: 'Underwriting within standard debt service limits.',
+      },
+      developerAudit: {
+        completed: false,
+        notes: `${property.developer} public signal check.`,
+        customSignals: property.developerSignals,
+      },
+      siteVisit: {
+        completed: false,
+        notes: '',
+        checklist: [
+          {
+            id: 'sv-1',
+            category: 'Structure & Ceilings',
+            item: 'Check for water stains, hairline structural cracks, and slab deflection',
+            status: 'pending',
+            notes: '',
+          },
+          {
+            id: 'sv-2',
+            category: 'Plumbing & Fixtures',
+            item: 'Test water pressure, under-sink moisture, and drain trap flow rates',
+            status: 'pending',
+            notes: '',
+          },
+          {
+            id: 'sv-3',
+            category: 'Electrical & Breakers',
+            item: 'Inspect distribution board (DB box) compliance and grounded outlets',
+            status: 'pending',
+            notes: '',
+          },
+          {
+            id: 'sv-4',
+            category: 'Noise & Orientation',
+            item: 'Gauge highway acoustic levels during peak hours and afternoon sun glare',
+            status: 'pending',
+            notes: '',
+          },
+          {
+            id: 'sv-5',
+            category: 'Common Facilities',
+            item: 'Examine lift service logs, pool pump room maintenance, and refuse chute hygiene',
+            status: 'pending',
+            notes: '',
+          },
+        ],
+      },
+      countryCompliance: {
+        completed: false,
+        country: property.country,
+        notes: `Statutory verification for ${countryPack.name}`,
+        checklist: countryPack.defaultChecklist.map((item) => ({ ...item })),
+      },
+    },
+    decisionProfile: {
+      affordability: `Estimated DSR: ${dsrPercent}% under standard mortgage terms.`,
+      marketPosition: property.valuation.marketPosition,
+      riskSignals: 'Verify strata sinking fund reserves and management corporation audit.',
+      downsideResilience: 'Defensive rental yield supports tenant occupancy.',
+      strengths: [
+        `Prime connectivity within walking distance of key transit nodes in ${property.city}.`,
+        `Established reputable master developer (${property.developer}) with low defect track record.`,
+        `Resilient rental demand profile (${property.currency} ${property.estimatedRentalValue}/mo estimated).`,
+      ],
+      risks: [
+        `Potential noise from upcoming high-density projects in adjacent plots.`,
+        `Upcoming maintenance fee or sinking fund adjustments upon management handover.`,
+        `Interest rate volatility risk over initial loan tenure lock-in period.`,
+      ],
+      verdictRecommendation: `Verify management corporation audited accounts and sinking fund balance. Request official defect inspection report before executing Letter of Offer.`,
+      negotiationAdvice: `Leverage current market inventory to negotiate an inclusion of fixtures or a 3-5% price buffer.`,
+      lastSynthesizedAt: 'Initial Seed',
+    },
+  };
+};
+
+// Helper to robustly sanitize and patch Case Files against schema updates
+const sanitizeCaseFile = (c: any, fallbackProfile: UserProfile = DEFAULT_USER_PROFILE): CaseFile => {
+  const prop = MOCK_PROPERTIES.find((p) => p.id === c?.propertyId) || MOCK_PROPERTIES[0];
+  const defaultCase = createNewCaseFile(prop, fallbackProfile);
+  const rawDP = c?.decisionProfile || c?.verdict || {};
+
+  const mergedModules = {
+    ...defaultCase.modules,
+    ...(c?.modules || {}),
+    stressTest: {
+      ...defaultCase.modules.stressTest,
+      ...(c?.modules?.stressTest || {}),
+    },
+    countryCompliance: {
+      ...defaultCase.modules.countryCompliance,
+      ...(c?.modules?.countryCompliance || {}),
+    },
+    developerAudit: {
+      ...defaultCase.modules.developerAudit,
+      ...(c?.modules?.developerAudit || {}),
+      customSignals: c?.modules?.developerAudit?.customSignals || defaultCase.modules.developerAudit.customSignals,
+      groundedNews: c?.modules?.developerAudit?.groundedNews,
+      searchQueries: c?.modules?.developerAudit?.searchQueries,
+    },
+    priceAnalysis: {
+      ...defaultCase.modules.priceAnalysis,
+      ...(c?.modules?.priceAnalysis || {}),
+    },
+    siteVisit: {
+      ...defaultCase.modules.siteVisit,
+      ...(c?.modules?.siteVisit || {}),
+      inspectionVideos: c?.modules?.siteVisit?.inspectionVideos || [],
+    },
+  };
+
+  const calculated = computeCaseFileProgress({ modules: mergedModules });
+  const effectiveProgressPercent = typeof c?.progressPercent === 'number' && c.progressPercent >= calculated.progressPercent
+    ? c.progressPercent
+    : calculated.progressPercent;
+  const effectiveStatus = c?.status || calculated.status;
+
+  return {
+    ...defaultCase,
+    ...c,
+    propertyId: prop.id,
+    status: effectiveStatus,
+    progressPercent: effectiveProgressPercent,
+    decisionProfile: {
+      ...defaultCase.decisionProfile,
+      ...rawDP,
+      risks: Array.isArray(rawDP.risks) && rawDP.risks.length > 0
+        ? rawDP.risks
+        : (defaultCase.decisionProfile?.risks || [
+            'Upcoming maintenance fee or sinking fund adjustments upon management handover.',
+            'Interest rate volatility risk over initial loan tenure lock-in period.',
+            'Potential noise from upcoming high-density projects in adjacent plots.',
+          ]),
+      strengths: Array.isArray(rawDP.strengths) && rawDP.strengths.length > 0
+        ? rawDP.strengths
+        : (defaultCase.decisionProfile?.strengths || [
+            `Prime connectivity within walking distance of key transit nodes in ${prop.city}.`,
+            `Established reputable master developer (${prop.developer}) with solid track record.`,
+            `Resilient rental demand profile (${prop.currency} ${prop.estimatedRentalValue}/mo estimated).`,
+          ]),
+      verdictRecommendation: rawDP.verdictRecommendation || defaultCase.decisionProfile?.verdictRecommendation || '',
+      negotiationAdvice: rawDP.negotiationAdvice || defaultCase.decisionProfile?.negotiationAdvice || '',
+      marketPosition: rawDP.marketPosition || defaultCase.decisionProfile?.marketPosition || prop.valuation?.marketPosition || 'Fairly Valued',
+    },
+    modules: mergedModules,
+  };
+};
+
+export const App: React.FC = () => {
+  const [currentUser, setCurrentUser] = useState<User | null>(null);
+  const [activeTab, setActiveTab] = useState<NavTab>('search');
+  const [selectedProperty, setSelectedProperty] = useState<Property | null>(null);
+  const [activeSightViewCaseId, setActiveSightViewCaseId] = useState<string | null>(null);
+  const [isAuthModalOpen, setIsAuthModalOpen] = useState<boolean>(false);
+  const [authModalReason, setAuthModalReason] = useState<string>(
+    'Sign in or register to access verified property listings, financial stress testing, and due diligence dossiers.'
+  );
+  const [pendingAuthAction, setPendingAuthAction] = useState<(() => void) | null>(null);
+
+  const executeWithAuth = (reason: string, action: () => void) => {
+    if (currentUser) {
+      action();
+    } else {
+      setAuthModalReason(reason);
+      setPendingAuthAction(() => action);
+      setIsAuthModalOpen(true);
+    }
+  };
+
+  const [isProfileModalOpen, setIsProfileModalOpen] = useState<boolean>(false);
+
+  // Synchronize User Session: Distinguish cleanly between first-time and returning users
+  const syncUserSession = async (user: User) => {
+    try {
+      const userKey = `homestory_user_${user.uid}`;
+      const isTargetUserToReset = user.email?.toLowerCase() === 'aisshu16apple@gmail.com';
+
+      // If user requested account deletion & reset, wipe remote & local data
+      if (isTargetUserToReset) {
+        await firestoreSync.deleteUserProfile(user.uid).catch(() => {});
+        localStorage.removeItem(userKey);
+        localStorage.removeItem(`homestory_saved_${user.uid}`);
+        localStorage.removeItem(`homestory_cases_${user.uid}`);
+        localStorage.removeItem('homestory_user_profile');
+        localStorage.removeItem('homestory_saved_ids');
+        localStorage.removeItem('homestory_case_files');
+      }
+
+      const cachedProfileStr = isTargetUserToReset ? null : localStorage.getItem(userKey);
+
+      // Check remote Firestore first (force null if target user reset requested)
+      const remoteProfile = isTargetUserToReset ? null : await firestoreSync.getUserProfile(user.uid);
+      const existingProfile = remoteProfile || (cachedProfileStr ? JSON.parse(cachedProfileStr) : null);
+
+      if (existingProfile && !isTargetUserToReset) {
+        // Returning user: restore their own personal profile and saved dossier
+        setUserProfile(existingProfile);
+        const savedIds = await firestoreSync.getSavedPropertyIds(user.uid);
+        const finalSaved = savedIds.length > 0 ? savedIds : JSON.parse(localStorage.getItem(`homestory_saved_${user.uid}`) || '[]');
+        setSavedPropertyIds(finalSaved);
+
+        const cases = await firestoreSync.getCaseFiles(user.uid);
+        const localCases = JSON.parse(localStorage.getItem(`homestory_cases_${user.uid}`) || '[]');
+        const finalCases = cases.length > 0 ? cases : localCases;
+        setCaseFiles(finalCases.map((c: any) => sanitizeCaseFile(c, existingProfile)));
+        setAuthWelcomeToast(`Welcome back, ${existingProfile.displayName || existingProfile.name}!`);
+      } else {
+        // First-time user: initialize clean fresh profile from Google / Auth credentials
+        const cleanName = user.displayName || (user.email ? user.email.split('@')[0] : 'Property Buyer');
+        const freshProfile: UserProfile = {
+          id: user.uid,
+          name: cleanName,
+          displayName: cleanName,
+          email: user.email || '',
+          residencyStatus: 'Citizen',
+          buyerRole: 'First-time Homebuyer',
+          countryPreference: 'Malaysia',
+          monthlyGrossIncome: 0,
+          existingMonthlyDebts: 0,
+          defaultCurrency: 'MYR',
+        };
+
+        setUserProfile(freshProfile);
+        // Clean slate for new user: empty saved list & empty case files (starts at min value)
+        setSavedPropertyIds([]);
+        setCaseFiles([]);
+
+        localStorage.setItem(userKey, JSON.stringify(freshProfile));
+        localStorage.setItem(`homestory_saved_${user.uid}`, JSON.stringify([]));
+        localStorage.setItem(`homestory_cases_${user.uid}`, JSON.stringify([]));
+        localStorage.setItem('homestory_user_profile', JSON.stringify(freshProfile));
+        localStorage.setItem('homestory_saved_ids', JSON.stringify([]));
+        localStorage.setItem('homestory_case_files', JSON.stringify([]));
+
+        firestoreSync.saveUserProfile(user.uid, freshProfile).catch(console.warn);
+        setAuthWelcomeToast(`Welcome to Homestory, ${cleanName}! Please set up your first-time buyer profile.`);
+        setIsProfileModalOpen(true); // Open First-Time Onboarding Modal
+      }
+    } catch (err) {
+      console.error('User session sync error:', err);
+    }
+  };
+
+  // Full reset account action: Wipes records and signs out so user can test the first-time user login journey
+  const handleResetUserAccount = async () => {
+    if (currentUser) {
+      await firestoreSync.deleteUserProfile(currentUser.uid).catch(() => {});
+      await signOutUser().catch(() => {});
+    }
+    sessionStorage.removeItem('homestory_aisshu_reset_done');
+    localStorage.clear();
+
+    const freshProfile: UserProfile = {
+      id: 'buyer-fresh',
+      name: 'New Property Buyer',
+      displayName: 'New Property Buyer',
+      email: '',
+      residencyStatus: 'Citizen',
+      buyerRole: 'First-time Homebuyer',
+      countryPreference: 'Malaysia',
+      monthlyGrossIncome: 0,
+      existingMonthlyDebts: 0,
+      defaultCurrency: detectLocationCurrency(),
+      currencyPreference: 'AUTO',
+    };
+
+    setCurrentUser(null);
+    setUserProfile(freshProfile);
+    setSavedPropertyIds([]);
+    setCaseFiles([]);
+    setActiveCaseFile(null);
+    setSelectedProperty(null);
+    setActiveTab('search');
+    setAuthWelcomeToast('Account details wiped. You are now logged out to test the first-time user flow.');
+    setIsAuthModalOpen(true); // Trigger login or login via Google
+  };
+
+  const handleAuthSuccess = (user: User) => {
+    setCurrentUser(user);
+    setIsAuthModalOpen(false);
+    syncUserSession(user);
+    if (pendingAuthAction) {
+      pendingAuthAction();
+      setPendingAuthAction(null);
+    }
+  };
+
+  const handleSignOut = async () => {
+    try {
+      await signOutUser();
+      setCurrentUser(null);
+      setAuthWelcomeToast('You have signed out successfully.');
+    } catch (err) {
+      console.error('Sign out error:', err);
+    }
+  };
+
+  // Push browser history state so user can use the browser's native Back button everywhere except Home
+  const pushNavHistory = () => {
+    try {
+      window.history.pushState({ timestamp: Date.now() }, '');
+    } catch {}
+  };
+
+  const handleSelectPropertyInternal = (prop: Property | null) => {
+    window.scrollTo({ top: 0, left: 0, behavior: 'instant' });
+    document.documentElement.scrollTop = 0;
+    document.body.scrollTop = 0;
+    if (prop) pushNavHistory();
+    setSelectedProperty(prop);
+  };
+
+  const handleSelectProperty = (prop: Property | null) => {
+    if (!prop) {
+      handleSelectPropertyInternal(null);
+      return;
+    }
+    executeWithAuth(
+      `Sign in or register to inspect ${prop.title}'s valuation corridor, developer audit, and due diligence.`,
+      () => {
+        handleSelectPropertyInternal(prop);
+      }
+    );
+  };
+  const [activeCaseFile, setActiveCaseFile] = useState<CaseFile | null>(null);
+  const [searchResults, setSearchResults] = useState<Property[] | null>(null);
+  const [searchCriteriaText, setSearchCriteriaText] = useState<string>('');
+  const [isDrawerOpen, setIsDrawerOpen] = useState<boolean>(false);
+  const [isHowItWorksOpen, setIsHowItWorksOpen] = useState<boolean>(false);
+
+  // Browser History and Popstate support for native & browser back button navigation everywhere except Home
+  useEffect(() => {
+    const handlePopState = () => {
+      if (activeCaseFile) {
+        setActiveCaseFile(null);
+      } else if (selectedProperty) {
+        setSelectedProperty(null);
+      } else if (searchResults !== null) {
+        setSearchResults(null);
+      } else if (activeTab !== 'search') {
+        setActiveTab('search');
+      }
+    };
+
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, [activeCaseFile, selectedProperty, searchResults, activeTab]);
+
+  // Apple-style scroll reveal IntersectionObserver for smooth upward animations
+  useEffect(() => {
+    const observer = new IntersectionObserver(
+      (entries) => {
+        entries.forEach((entry) => {
+          if (entry.isIntersecting) {
+            entry.target.classList.add('is-revealed');
+          }
+        });
+      },
+      {
+        root: null,
+        rootMargin: '0px 0px -30px 0px',
+        threshold: 0.05,
+      }
+    );
+
+    const observeElements = () => {
+      const elements = document.querySelectorAll('.apple-reveal:not(.is-revealed)');
+      elements.forEach((el) => observer.observe(el));
+    };
+
+    observeElements();
+    const interval = setInterval(observeElements, 400);
+
+    return () => {
+      observer.disconnect();
+      clearInterval(interval);
+    };
+  }, [activeTab, selectedProperty, activeCaseFile, searchResults]);
+
+  // Scroll to top only when switching tabs, opening a new property or opening a different case file
+  const activeCaseId = activeCaseFile?.caseId;
+  const selectedPropertyId = selectedProperty?.id;
+  const isSearchActive = searchResults !== null;
+
+  useEffect(() => {
+    window.scrollTo({ top: 0, left: 0, behavior: 'instant' });
+    document.documentElement.scrollTop = 0;
+    document.body.scrollTop = 0;
+  }, [activeTab, selectedPropertyId, activeCaseId, isSearchActive]);
+
+  // User Profile
+  const [userProfile, setUserProfile] = useState<UserProfile>(() => {
+    try {
+      const stored = localStorage.getItem('homestory_user_profile');
+      return stored ? JSON.parse(stored) : DEFAULT_USER_PROFILE;
+    } catch {
+      return DEFAULT_USER_PROFILE;
+    }
+  });
+
+  // Saved Properties - default to real Malaysian properties
+  const [savedPropertyIds, setSavedPropertyIds] = useState<string[]>(() => {
+    try {
+      const stored = localStorage.getItem('homestory_saved_ids');
+      if (stored) {
+        const parsed = JSON.parse(stored);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          const valid = parsed.filter((id: string) => MOCK_PROPERTIES.some((p) => p.id === id));
+          if (valid.length > 0) return valid;
+        }
+      }
+      return [MOCK_PROPERTIES[0].id, MOCK_PROPERTIES[1].id];
+    } catch {
+      return [MOCK_PROPERTIES[0].id, MOCK_PROPERTIES[1].id];
+    }
+  });
+
+  // Case Files - sanitized against current MOCK_PROPERTIES with deep fallback merging
+  const [caseFiles, setCaseFiles] = useState<CaseFile[]>(() => {
+    try {
+      const stored = localStorage.getItem('homestory_case_files');
+      if (stored) {
+        const parsed = JSON.parse(stored);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          return parsed.map((c: any) => sanitizeCaseFile(c, DEFAULT_USER_PROFILE));
+        }
+      }
+      return [
+        createNewCaseFile(MOCK_PROPERTIES[0], DEFAULT_USER_PROFILE),
+        createNewCaseFile(MOCK_PROPERTIES[1], DEFAULT_USER_PROFILE),
+      ];
+    } catch {
+      return [
+        createNewCaseFile(MOCK_PROPERTIES[0], DEFAULT_USER_PROFILE),
+        createNewCaseFile(MOCK_PROPERTIES[1], DEFAULT_USER_PROFILE),
+      ];
+    }
+  });
+
+  const [authWelcomeToast, setAuthWelcomeToast] = useState<string | null>(null);
+
+  // Test Firestore on boot and listen to Auth
+  useEffect(() => {
+    testFirestoreConnection();
+
+    const unsubscribe = onAuthStateChanged(auth, async (user) => {
+      setCurrentUser(user);
+      if (user) {
+        await syncUserSession(user);
+      }
+    });
+
+    return () => unsubscribe();
+  }, []);
+
+  // Sync state changes to localStorage and Firestore
+  const handleUpdateProfile = async (newProfile: UserProfile) => {
+    setUserProfile(newProfile);
+    localStorage.setItem('homestory_user_profile', JSON.stringify(newProfile));
+
+    if (currentUser) {
+      try {
+        await firestoreSync.saveUserProfile(currentUser.uid, newProfile);
+      } catch (err) {
+        console.error('Error saving profile to Firestore:', err);
+      }
+    }
+  };
+
+  const handleToggleSave = async (propertyId: string) => {
+    const isSaved = savedPropertyIds.includes(propertyId);
+    const updated = isSaved
+      ? savedPropertyIds.filter((id) => id !== propertyId)
+      : [...savedPropertyIds, propertyId];
+
+    setSavedPropertyIds(updated);
+    localStorage.setItem('homestory_saved_ids', JSON.stringify(updated));
+
+    if (currentUser) {
+      try {
+        if (isSaved) {
+          await firestoreSync.removeSavedProperty(currentUser.uid, propertyId);
+        } else {
+          await firestoreSync.saveProperty(currentUser.uid, propertyId);
+        }
+      } catch (err) {
+        console.error('Error syncing saved property to Firestore:', err);
+      }
+    }
+  };
+
+  const handleUpdateCaseFile = async (updated: CaseFile) => {
+    const updatedCases = caseFiles.map((c) => (c.caseId === updated.caseId ? updated : c));
+    setCaseFiles(updatedCases);
+    setActiveCaseFile(updated);
+    localStorage.setItem('homestory_case_files', JSON.stringify(updatedCases));
+
+    if (currentUser) {
+      try {
+        await firestoreSync.saveCaseFile(currentUser.uid, updated);
+      } catch (err) {
+        console.error('Error syncing case file to Firestore:', err);
+      }
+    }
+  };
+
+  const handleToggleCountry = () => {
+    const nextCountry = userProfile.countryPreference === 'Malaysia' ? 'Singapore' : 'Malaysia';
+    const nextCurrency = nextCountry === 'Malaysia' ? 'MYR' : 'SGD';
+    handleUpdateProfile({
+      ...userProfile,
+      countryPreference: nextCountry,
+      defaultCurrency: nextCurrency,
+    });
+  };
+
+  // Start Due Diligence on a property
+  const handleStartDueDiligenceInternal = (prop: Property) => {
+    const existing = caseFiles.find((c) => c.propertyId === prop.id);
+    if (existing) {
+      setActiveCaseFile(existing);
+    } else {
+      const newCase = createNewCaseFile(prop, userProfile);
+      const updated = [newCase, ...caseFiles];
+      setCaseFiles(updated);
+      setActiveCaseFile(newCase);
+      localStorage.setItem('homestory_case_files', JSON.stringify(updated));
+
+      if (currentUser) {
+        firestoreSync.saveCaseFile(currentUser.uid, newCase).catch(console.error);
+      }
+    }
+
+    setSelectedProperty(null);
+    setActiveTab('cases');
+  };
+
+  const handleStartDueDiligence = (prop: Property) => {
+    executeWithAuth(
+      `Sign in or register to launch a comprehensive due diligence dossier for ${prop.title}.`,
+      () => {
+        handleStartDueDiligenceInternal(prop);
+      }
+    );
+  };
+
+  // Dismiss / Close a Case File
+  const handleDismissCase = async (caseId: string) => {
+    const updated = caseFiles.filter((c) => c.caseId !== caseId);
+    setCaseFiles(updated);
+    if (activeCaseFile?.caseId === caseId) {
+      setActiveCaseFile(null);
+    }
+    localStorage.setItem('homestory_case_files', JSON.stringify(updated));
+    if (currentUser) {
+      try {
+        await firestoreSync.removeCaseFile(currentUser.uid, caseId);
+      } catch (err) {
+        console.warn('Firestore dismiss case sync:', err);
+      }
+    }
+  };
+
+  // Handle Search Filtering
+  const handlePerformSearchInternal = (filters: {
+    purpose: PurchasePurpose | 'All';
+    propertyType: string;
+    location: string;
+    maxPrice: number;
+    searchQuery?: string;
+  }) => {
+    const rawQuery = (filters.searchQuery || '').trim().toLowerCase();
+    // Filter out common filler words
+    const queryTokens = rawQuery
+      ? rawQuery
+          .replace(/[?,.:;!]/g, '')
+          .split(/\s+/)
+          .filter((t) => t.length > 1 && !['the', 'and', 'for', 'with', 'in', 'near', 'under', 'below'].includes(t))
+      : [];
+
+    const filtered = MOCK_PROPERTIES.filter((p) => {
+      // 1. Purpose filter
+      if (filters.purpose !== 'All' && p.purpose !== filters.purpose) return false;
+
+      // 2. Property type filter
+      if (filters.propertyType !== 'All' && p.propertyType !== filters.propertyType) {
+        if (!p.propertyType.toLowerCase().includes(filters.propertyType.toLowerCase())) {
+          return false;
+        }
+      }
+
+      // 3. Location filter - flexible matching across Singapore and Malaysian regions
+      if (filters.location !== 'All') {
+        const queryLoc = filters.location.toLowerCase();
+        const matchesLoc =
+          p.city.toLowerCase().includes(queryLoc) ||
+          p.country.toLowerCase().includes(queryLoc) ||
+          p.address.toLowerCase().includes(queryLoc) ||
+          (p.stateDistrict && p.stateDistrict.toLowerCase().includes(queryLoc)) ||
+          (queryLoc.includes('singapore') && p.country.toLowerCase().includes('singapore')) ||
+          (queryLoc.includes('selangor') && (p.city.toLowerCase().includes('petaling jaya') || p.city.toLowerCase().includes('subang jaya') || p.city.toLowerCase().includes('selangor'))) ||
+          (queryLoc.includes('kuala lumpur') && (p.city.toLowerCase().includes('kuala lumpur') || p.stateDistrict?.toLowerCase().includes('klcc') || p.stateDistrict?.toLowerCase().includes('mont kiara') || p.stateDistrict?.toLowerCase().includes('sentul'))) ||
+          (queryLoc.includes('penang') && (p.city.toLowerCase().includes('penang') || p.address.toLowerCase().includes('penang'))) ||
+          (queryLoc.includes('johor') && (p.city.toLowerCase().includes('johor') || p.address.toLowerCase().includes('johor')));
+        if (!matchesLoc) return false;
+      }
+
+      // 4. Free-Text Search Query matching across title, developer, city, district, country, address, tenure, amenities
+      if (queryTokens.length > 0) {
+        const searchableText = [
+          p.title,
+          p.developer,
+          p.city,
+          p.country,
+          p.stateDistrict,
+          p.address,
+          p.propertyType,
+          p.tenure,
+          p.description,
+          ...(p.amenities || []),
+        ]
+          .filter(Boolean)
+          .join(' ')
+          .toLowerCase();
+
+        const matchesQuery = queryTokens.some((token) => {
+          if (token === 'sg' || token === 'singapore') return p.country.toLowerCase() === 'singapore';
+          if (token === 'my' || token === 'malaysia' || token === 'kl') return p.country.toLowerCase() === 'malaysia';
+          if (token.includes('bed') || token.includes('br')) {
+            const num = parseInt(token);
+            if (!isNaN(num)) return p.bedrooms === num;
+          }
+          return searchableText.includes(token);
+        });
+
+        if (!matchesQuery) return false;
+      }
+
+      // 5. Budget filter (Starts from 0, or user types in the amount box with cross-border conversion):
+      if (filters.maxPrice > 0 && filters.maxPrice < 50000000) {
+        const isSingaporeFilter = filters.location === 'Singapore' || rawQuery.includes('singapore') || rawQuery.includes('s$');
+        const filterCurrency = isSingaporeFilter ? 'SGD' : 'MYR';
+        const comparePrice = p.currency === filterCurrency ? p.price : (
+          p.currency === 'SGD' && filterCurrency === 'MYR' ? p.price * 3.50 :
+          p.currency === 'MYR' && filterCurrency === 'SGD' ? p.price * 0.2857 : p.price
+        );
+        if (comparePrice > filters.maxPrice) {
+          return false;
+        }
+      }
+      return true;
+    });
+
+    const criteriaSummary = [
+      filters.purpose === 'Rent' ? 'Rent' : 'Buy',
+      filters.propertyType !== 'All' ? filters.propertyType : null,
+      filters.location !== 'All' ? filters.location : null,
+      filters.maxPrice > 0 && filters.maxPrice < 50000000
+        ? `Up to ${filters.location === 'Singapore' ? 'S$' : 'RM'} ${filters.maxPrice.toLocaleString()} ${filters.purpose === 'Rent' ? '/mo' : ''}`
+        : 'Any Budget',
+      filters.searchQuery ? `"${filters.searchQuery}"` : null,
+    ]
+      .filter(Boolean)
+      .join(' • ');
+
+    setSearchResults(filtered);
+    setSearchCriteriaText(filters.searchQuery ? `Query: "${filters.searchQuery}" (${criteriaSummary})` : criteriaSummary);
+    setSelectedProperty(null);
+  };
+
+  const handlePerformSearch = (filters: {
+    purpose: PurchasePurpose | 'All';
+    propertyType: string;
+    location: string;
+    maxPrice: number;
+    searchQuery?: string;
+  }) => {
+    executeWithAuth(
+      'Sign in or register to search verified property listings and run AI inquiries.',
+      () => {
+        handlePerformSearchInternal(filters);
+      }
+    );
+  };
+
+  // Save SightView Session into Case Dossier
+  const handleSaveSightViewToCase = (session: any) => {
+    const targetProp = selectedProperty || session.property || MOCK_PROPERTIES[0];
+    let targetCase = caseFiles.find(
+      (c) => (activeSightViewCaseId && c.caseId === activeSightViewCaseId) || c.propertyId === targetProp.id
+    );
+    if (!targetCase) {
+      targetCase = createNewCaseFile(targetProp, userProfile);
+    }
+
+    const existingTranscripts = targetCase.modules?.siteVisit?.transcripts || [];
+    const existingPhotos = targetCase.modules?.siteVisit?.photos || [];
+
+    const newTranscripts = session.transcripts || [
+      {
+        speaker: 'SightView AI',
+        text: session.defectObservation || 'Defect inspection observation logged',
+        timestamp: new Date().toLocaleTimeString(),
+      },
+    ];
+
+    const newPhotos = session.photos || (session.photoUrl ? [session.photoUrl] : []);
+    const existingVideos = targetCase.modules?.siteVisit?.inspectionVideos || [];
+    const newVideos = session.recordedVideos || (session.video ? [session.video] : []);
+
+    const updatedModules = {
+      ...targetCase.modules,
+      siteVisit: {
+        ...targetCase.modules.siteVisit,
+        completed: false,
+        status: 'in progress',
+        transcripts: [...existingTranscripts, ...newTranscripts],
+        photos: Array.from(new Set([...existingPhotos, ...newPhotos])),
+        inspectionVideos: [...existingVideos, ...newVideos],
+      },
+    };
+
+    const calculated = computeCaseFileProgress({ modules: updatedModules });
+
+    const updatedCase: CaseFile = {
+      ...targetCase,
+      status: calculated.status,
+      progressPercent: calculated.progressPercent,
+      modules: updatedModules,
+    };
+
+    handleUpdateCaseFile(updatedCase);
+    setActiveCaseFile(updatedCase);
+    setActiveTab('cases');
+  };
+
+  // Resolve effective user currency based on preference
+  const effectiveUserCurrency = useMemo(() => {
+    if (userProfile.currencyPreference === 'MYR') return 'MYR';
+    if (userProfile.currencyPreference === 'SGD') return 'SGD';
+    return userProfile.defaultCurrency || detectLocationCurrency();
+  }, [userProfile.currencyPreference, userProfile.defaultCurrency]);
+
+  // Resolve saved properties list
+  const savedPropertiesList = useMemo(() => {
+    return MOCK_PROPERTIES.filter((p) => savedPropertyIds.includes(p.id));
+  }, [savedPropertyIds]);
+
+  // Render current screen content
+  const renderScreenContent = () => {
+    // 1. SightView AI Live Camera Inspection (High Priority Tool Screen)
+    if (activeTab === 'sightview') {
+      return (
+        <SightViewScreen
+          userProfile={userProfile}
+          initialProperty={selectedProperty}
+          allProperties={MOCK_PROPERTIES}
+          onSaveToCaseFile={handleSaveSightViewToCase}
+          onBack={() => {
+            if (selectedProperty) {
+              // Return to the property detail
+              setActiveTab('search');
+            } else {
+              setActiveTab('search');
+            }
+          }}
+          onNavigateToProperty={(prop) => {
+            handleSelectPropertyInternal(prop);
+            setActiveTab('search');
+          }}
+        />
+      );
+    }
+
+    // 2. Active Case File Dashboard Drilldown (when a specific case is open in cases tab)
+    if (activeTab === 'cases' && activeCaseFile) {
+      const sanitizedActiveCase = sanitizeCaseFile(activeCaseFile, userProfile);
+      const prop = MOCK_PROPERTIES.find((p) => p.id === sanitizedActiveCase.propertyId) || MOCK_PROPERTIES[0];
+      return (
+        <CaseFileDashboard
+          caseFile={sanitizedActiveCase}
+          property={prop}
+          userProfile={userProfile}
+          onBack={() => setActiveCaseFile(null)}
+          onUpdateCaseFile={handleUpdateCaseFile}
+          onDismissCase={handleDismissCase}
+          onOpenSightView={(targetProp, caseId) => {
+            handleSelectPropertyInternal(targetProp);
+            setActiveSightViewCaseId(caseId || sanitizedActiveCase.caseId);
+            setActiveTab('sightview');
+          }}
+        />
+      );
+    }
+
+    // 3. Property Detail Screen (Overlay / Drilldown from Search or Saved)
+    if (selectedProperty) {
+      return (
+        <PropertyDetailScreen
+          property={selectedProperty}
+          onBack={() => setSelectedProperty(null)}
+          onStartDueDiligence={handleStartDueDiligence}
+          isSaved={savedPropertyIds.includes(selectedProperty.id)}
+          onToggleSave={handleToggleSave}
+          userProfile={userProfile}
+          onOpenSightView={(prop) => {
+            setSelectedProperty(prop);
+            setActiveTab('sightview');
+          }}
+        />
+      );
+    }
+
+    // 3. Main Navigation Tabs
+    switch (activeTab) {
+      case 'search':
+        if (searchResults !== null) {
+          return (
+            <SearchResultsScreen
+              properties={searchResults}
+              searchCriteriaText={searchCriteriaText}
+              onBackToSearch={() => setSearchResults(null)}
+              onSelectProperty={(prop) => handleSelectProperty(prop)}
+              savedPropertyIds={savedPropertyIds}
+              onToggleSave={handleToggleSave}
+              userCurrency={effectiveUserCurrency}
+              onStartDueDiligence={handleStartDueDiligence}
+            />
+          );
+        }
+        return (
+          <HomeSearchScreen
+            userProfile={userProfile}
+            properties={MOCK_PROPERTIES}
+            onSelectProperty={(prop) => handleSelectProperty(prop)}
+            onPerformSearch={handlePerformSearch}
+            savedPropertyIds={savedPropertyIds}
+            onToggleSave={handleToggleSave}
+            userCurrency={effectiveUserCurrency}
+            onOpenHowItWorks={() => setIsHowItWorksOpen(true)}
+            onStartDueDiligence={handleStartDueDiligence}
+            onOpenSightView={() => {
+              executeWithAuth('Sign in to launch SightView AI™ live camera inspection.', () => {
+                setActiveTab('sightview');
+              });
+            }}
+          />
+        );
+
+      case 'saved':
+        return (
+          <SavedScreen
+            savedProperties={savedPropertiesList}
+            caseFiles={caseFiles}
+            onSelectProperty={(prop) => handleSelectProperty(prop)}
+            onOpenCaseFile={(c) => {
+              setActiveCaseFile(sanitizeCaseFile(c, userProfile));
+              setActiveTab('cases');
+            }}
+            onStartDueDiligence={handleStartDueDiligence}
+            onRemoveBookmark={handleToggleSave}
+            onNavigateToSearch={() => {
+              setSearchResults(null);
+              setActiveTab('search');
+            }}
+            onOpenSightView={(prop) => {
+              handleSelectPropertyInternal(prop);
+              setActiveTab('sightview');
+            }}
+          />
+        );
+
+      case 'cases':
+        return (
+          <CaseFilesListView
+            caseFiles={caseFiles}
+            properties={MOCK_PROPERTIES}
+            onOpenCaseFile={(c) => setActiveCaseFile(sanitizeCaseFile(c, userProfile))}
+            onNavigateToSearch={() => {
+              setSearchResults(null);
+              setActiveTab('search');
+            }}
+            onDismissCase={handleDismissCase}
+          />
+        );
+
+      case 'account':
+        return (
+          <AccountScreen
+            userProfile={userProfile}
+            onUpdateProfile={handleUpdateProfile}
+            currentUser={currentUser}
+            onResetAccount={handleResetUserAccount}
+            onBack={() => setActiveTab('search')}
+          />
+        );
+
+      default:
+        return null;
+    }
+  };
+
+  const handleTabNavigation = (tab: NavTab) => {
+    handleSelectPropertyInternal(null);
+    setActiveCaseFile(null); // Always open the full list of case files when navigating to case files
+    if (tab === 'search') {
+      setSearchResults(null);
+      setActiveTab('search');
+      return;
+    }
+    if (tab === 'saved') {
+      executeWithAuth('Sign in or register to view your saved properties collection.', () => {
+        pushNavHistory();
+        setActiveTab('saved');
+      });
+      return;
+    }
+    if (tab === 'cases') {
+      executeWithAuth('Sign in or register to access due diligence case dossiers and stress tests.', () => {
+        pushNavHistory();
+        setActiveTab('cases');
+      });
+      return;
+    }
+    if (tab === 'sightview') {
+      executeWithAuth('Sign in or register to launch SightView AI™ live inspection camera.', () => {
+        pushNavHistory();
+        setActiveTab('sightview');
+      });
+      return;
+    }
+    if (tab === 'account') {
+      executeWithAuth('Sign in or register to configure your personal buyer underwriting profile.', () => {
+        pushNavHistory();
+        setActiveTab('account');
+      });
+      return;
+    }
+    pushNavHistory();
+    setActiveTab(tab);
+  };
+
+  return (
+    <div className="min-h-screen bg-[#FBF9F5] text-[#1E2A44] font-sans antialiased selection:bg-[#C98A3E]/20 flex flex-col">
+      {/* Editorial Desktop & Mobile Navbar with Wordmark, Links, Country Chip & Burger Trigger */}
+      <Navbar
+        activeTab={activeTab}
+        onChangeTab={handleTabNavigation}
+        savedCount={savedPropertyIds.length}
+        caseCount={caseFiles.length}
+        userProfile={userProfile}
+        currentUser={currentUser}
+        onOpenDrawer={() => setIsDrawerOpen(true)}
+        onOpenAuthModal={() => {
+          setAuthModalReason('Sign in or register to access verified property listings, financial stress testing, and due diligence dossiers.');
+          setIsAuthModalOpen(true);
+        }}
+      />
+
+      {/* Dynamic Screen View */}
+      <main className="flex-1">
+        {renderScreenContent()}
+      </main>
+
+      {/* Burger Slide-over Drawer */}
+      <BurgerDrawer
+        isOpen={isDrawerOpen}
+        onClose={() => setIsDrawerOpen(false)}
+        activeTab={activeTab}
+        onChangeTab={handleTabNavigation}
+        savedCount={savedPropertyIds.length}
+        caseCount={caseFiles.length}
+        userProfile={userProfile}
+        currentUser={currentUser}
+        onSignOut={handleSignOut}
+        onOpenHowItWorks={() => {
+          setIsDrawerOpen(false);
+          setIsHowItWorksOpen(true);
+        }}
+        onSwitchCountry={(country) => {
+          handleUpdateProfile({
+            ...userProfile,
+            countryPreference: country,
+            defaultCurrency: country === 'Malaysia' ? 'MYR' : 'SGD',
+          });
+        }}
+        onOpenAuthModal={() => {
+          setAuthModalReason('Sign in or register to access verified property listings, financial stress testing, and due diligence dossiers.');
+          setIsAuthModalOpen(true);
+        }}
+        onResetAccount={handleResetUserAccount}
+      />
+
+      {/* Editorial How It Works Walkthrough Modal */}
+      <HowItWorksModal
+        isOpen={isHowItWorksOpen}
+        onClose={() => setIsHowItWorksOpen(false)}
+        onStartExploring={() => {
+          setSelectedProperty(null);
+          setSearchResults(null);
+          setActiveTab('search');
+        }}
+      />
+
+      {/* Sign-In / Register Authentication Modal */}
+      <AuthModal
+        isOpen={isAuthModalOpen}
+        onClose={() => setIsAuthModalOpen(false)}
+        onSuccess={handleAuthSuccess}
+        actionReason={authModalReason}
+      />
+
+      {/* First-Time User Profile Setup Onboarding Modal */}
+      <UserProfileModal
+        isOpen={isProfileModalOpen}
+        onClose={() => setIsProfileModalOpen(false)}
+        userProfile={userProfile}
+        onSaveProfile={handleUpdateProfile}
+      />
+    </div>
+  );
+};
+
+export default App;

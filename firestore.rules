@@ -1,0 +1,88 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Default-deny catch-all
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Helper functions
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isValidUserProfile(data) {
+      return data.keys().hasAll(['id', 'email', 'displayName', 'residencyStatus', 'countryPreference']) &&
+             data.id is string && data.id.size() <= 128 &&
+             data.email is string && data.email.size() <= 256 &&
+             data.displayName is string && data.displayName.size() <= 128 &&
+             data.residencyStatus in ['Citizen', 'Permanent Resident', 'Foreign Buyer'] &&
+             data.countryPreference in ['Malaysia', 'Singapore'];
+    }
+
+    function isValidSavedProperty(data) {
+      return data.keys().hasAll(['propertyId', 'savedAt']) &&
+             data.propertyId is string && data.propertyId.size() <= 64;
+    }
+
+    function isValidCaseFile(data) {
+      return data.keys().hasAll(['caseId', 'propertyId', 'country', 'status']) &&
+             data.caseId is string && data.caseId.size() <= 64 &&
+             data.propertyId is string && data.propertyId.size() <= 64 &&
+             data.country in ['Malaysia', 'Singapore'] &&
+             data.status in ['not_started', 'in_progress', 'done'];
+    }
+
+    // User Profile Document
+    match /users/{userId} {
+      allow get: if isOwner(userId);
+      allow list: if isOwner(userId);
+      allow create: if isOwner(userId) && isValidId(userId) && isValidUserProfile(incoming()) && incoming().id == userId;
+      allow update: if isOwner(userId) && isValidId(userId) && isValidUserProfile(incoming()) && incoming().id == userId;
+      allow delete: if isOwner(userId);
+
+      // Subcollection: Saved Properties
+      match /saved/{propertyId} {
+        allow get: if isOwner(userId);
+        allow list: if isOwner(userId);
+        allow create: if isOwner(userId) && isValidId(propertyId) && isValidSavedProperty(incoming());
+        allow update: if isOwner(userId) && isValidId(propertyId) && isValidSavedProperty(incoming());
+        allow delete: if isOwner(userId) && isValidId(propertyId);
+      }
+
+      // Subcollection: Case Files
+      match /caseFiles/{caseId} {
+        allow get: if isOwner(userId);
+        allow list: if isOwner(userId);
+        allow create: if isOwner(userId) && isValidId(caseId) && isValidCaseFile(incoming());
+        allow update: if isOwner(userId) && isValidId(caseId) && isValidCaseFile(incoming());
+        allow delete: if isOwner(userId) && isValidId(caseId);
+      }
+
+      // Subcollection: Live Camera Inspections
+      match /inspections/{inspectionId} {
+        allow get: if isOwner(userId);
+        allow list: if isOwner(userId);
+        allow create: if isOwner(userId) && isValidId(inspectionId);
+        allow update: if isOwner(userId) && isValidId(inspectionId);
+        allow delete: if isOwner(userId) && isValidId(inspectionId);
+      }
+    }
+  }
+}
